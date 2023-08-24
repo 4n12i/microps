@@ -1,3 +1,6 @@
+// Linux 以外のプラットフォームへ容易に移植できるような構成
+// メモリ確保解放・排他制御
+
 #ifndef PLATFORM_H
 #define PLATFORM_H
 
