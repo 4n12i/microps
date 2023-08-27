@@ -26,11 +26,19 @@ struct ip_hdr {
     uint8_t options[];
 };
 
+/* IPの上位のプロトコルを管理するための構造体 */
+struct ip_protocol {
+    struct ip_protocol *next;
+    uint8_t type;
+    void (*handler)(const uint8_t *data, size_t len, ip_addr_t src, ip_addr_t dst, struct ip_iface *iface);
+};
+
 const ip_addr_t IP_ADDR_ANY       = 0x00000000; /* 0.0.0.0 */
 const ip_addr_t IP_ADDR_BROADCAST = 0xffffffff; /* 255.255.255.255 */
 
 /* NOTE: If you want to add/delete the entries after `net_run()`, you need to protect these lists with a mutex. */
 static struct ip_iface *ifaces;
+static struct ip_protocol *protocols; /* 登録されているプロトコルのリスト */
 
 int
 ip_addr_pton(const char *p, ip_addr_t *n)
@@ -164,6 +172,35 @@ ip_iface_select(ip_addr_t addr)
     return entry;
 }
 
+/* NOTE: Must not be call after `net_run()`. */
+/* プロトコルの登録 */
+int 
+ip_protocol_register(uint8_t type, void (*handler)(const uint8_t *data, size_t len, ip_addr_t src, ip_addr_t dst, struct ip_iface *iface)) 
+{
+    struct ip_protocol *entry;
+
+    /* EXERCISE 9-1: 重複登録の確認 */
+    for (entry = protocols; entry; entry = entry->next) {
+        if (entry->type == type) {
+            errorf("already exists, type=%u", entry->type);
+            return -1;
+        }
+    }
+
+    /* EXERCISE 9-2: プロトコルの登録 */
+    entry = memory_alloc(sizeof(*entry));
+    if (!entry){
+        errorf("memory_alloc() failure");
+        return -1;
+    }
+    entry->type = type;
+    entry->handler = handler;
+    protocols = entry;
+    
+    infof("registered, type=%u", entry->type);
+    return 0;
+}
+
 static void 
 ip_input(const uint8_t *data, size_t len, struct net_device *dev) 
 {
@@ -172,6 +209,8 @@ ip_input(const uint8_t *data, size_t len, struct net_device *dev)
     uint16_t hlen, total, offset;
     struct ip_iface *iface;
     char addr[IP_ADDR_STR_LEN];
+
+    struct ip_protocol *proto;
 
     if (len < IP_HDR_SIZE_MIN) {
         errorf("too short");
@@ -219,11 +258,17 @@ ip_input(const uint8_t *data, size_t len, struct net_device *dev)
 
     debugf("dev=%s, iface=%s, protocol=%u, total=%u", dev->name, ip_addr_ntop(iface->unicast, addr, sizeof(addr)), hdr->protocol, total);
     ip_dump(data, total);
-}
 
-/** 
- * STEP8 IPデータグラムの出力
-*/
+    /* EXERCISE 9-3: プロトコルの検索 */
+    for (proto = protocols; proto; proto = proto->next) {
+        if (proto->type == hdr->protocol) {
+            proto->handler((uint8_t *)hdr + hlen, total - hlen, hdr->src, hdr->dst, iface);
+            return;
+        }
+    }
+
+    /* unsupported protocol */
+}
 
 /* デバイスからの送信 */
 static int 
