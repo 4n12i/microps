@@ -14,13 +14,13 @@
 /* IP header */
 struct ip_hdr {
     uint8_t vhl; /* version (4bit) + IP header length (4bit) */
-    uint8_t tos;
+    uint8_t tos; /* type of service */
     uint16_t total;
     uint16_t id;
     uint16_t offset; /* flag (3bit) + fragment offset (13bit) */
-    uint8_t ttl;
-    uint8_t protocol;
-    uint16_t sum;
+    uint8_t ttl; /* time to live */
+    uint8_t protocol; /* protocol number */
+    uint16_t sum; /* header checksum */
     ip_addr_t src;
     ip_addr_t dst;
     uint8_t options[];
@@ -219,26 +219,25 @@ ip_input(const uint8_t *data, size_t len, struct net_device *dev)
     hdr = (struct ip_hdr *)data;
 
     /* EXERCISE: Validating IP datagrams. */
-    v = (hdr->vhl & 0xf0) >> 4;
+    v = hdr->vhl >> 4;
     if (v != IP_VERSION_IPV4) {
-        errorf("Don't match IP_VERSION_IPv4.");
+        errorf("ip version error: v=%u", v);
         return;
     }
-    hlen = hdr->vhl & 0x0f; 
+    hlen = (hdr->vhl & 0x0f) << 2; 
     if (len < hlen) {
-        errorf("Input data length (len) is less than header length (hlen).");
+        errorf("header length error: len=%zu < hlen%u", len, hlen);
         return;
     }
     total = ntoh16(hdr->total);
     if (len < total) {
-        errorf("Input data length (len) is less than total length (total).");
+        errorf("total length error: len=%zu < total=%u", len, total);
         return;
     }
     if (cksum16((uint16_t *)data, len, 0) != (uint16_t)0) {
-        errorf("Verification failed with checksum.");
+        errorf("checksum error: sum=0x%04x, verify=0x%04x", ntoh16(hdr->sum), ntoh16(cksum16((uint16_t *)hdr, hlen, -hdr->sum)));
         return;
     }
-
     offset = ntoh16(hdr->offset);
     if (offset & 0x2000 || offset & 0x1fff) {
         errorf("fragments does not support");
