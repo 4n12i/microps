@@ -11,12 +11,13 @@
 #include "net.h"
 #include "ip.h"
 
+/* IP header */
 struct ip_hdr {
-    uint8_t vhl;
+    uint8_t vhl; /* version (4bit) + IP header length (4bit) */
     uint8_t tos;
     uint16_t total;
     uint16_t id;
-    uint16_t offset;
+    uint16_t offset; /* flag (3bit) + fragment offset (13bit) */
     uint8_t ttl;
     uint8_t protocol;
     uint16_t sum;
@@ -78,7 +79,7 @@ ip_dump(const uint8_t *data, size_t len)
     hdr = (struct ip_hdr *)data;
     v = (hdr->vhl & 0xf0) >> 4;
     hl = hdr->vhl & 0x0f;
-    hlen = hl << 2;
+    hlen = hl << 2; /* hlen >> 2 (hl) & 0xf0 = hdr->vhl, (hdr->vhl << 4) & 0xf0 */
     fprintf(stderr, "       vhl: 0x%02x [v: %u, hl: %u (%u)]\n", hdr->vhl, v, hl, hlen);
     fprintf(stderr, "       tos: 0x%02x\n", hdr->tos);
     total = ntoh16(hdr->total);
@@ -134,12 +135,12 @@ ip_iface_register(struct net_device *dev, struct ip_iface *iface)
     char addr3[IP_ADDR_STR_LEN];
 
     /* EXERCISE: Registering an IP interface. */
-    if (net_device_add_iface(dev, (struct net_iface *)iface) == -1) {
+    if (net_device_add_iface(dev, NET_IFACE(iface)) == -1) {
         errorf("net_device_add_iface() failure");
         return -1;
     }
-    NET_IFACE(iface)->next = dev->ifaces;
-    dev->ifaces = NET_IFACE(iface);
+    iface->next = ifaces;
+    ifaces = iface;
 
     infof("registered: dev=%s, unicast=%s, netmask=%s, broadcast=%s", dev->name, 
         ip_addr_ntop(iface->unicast, addr1, sizeof(addr1)), 
@@ -156,11 +157,11 @@ ip_iface_select(ip_addr_t addr)
 
     for (entry = ifaces; entry; entry = entry->next) {
         if (entry->unicast == addr) {
-            return entry;
+            break;
         }
     }
 
-    return NULL;
+    return entry;
 }
 
 static void 
