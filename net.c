@@ -9,6 +9,7 @@
 #include "net.h"
 #include "ip.h"
 #include "icmp.h"
+#include "arp.h"
 
 struct net_protocol {
     struct net_protocol *next;
@@ -266,6 +267,11 @@ net_init(void)
     /* EXERCISE 9-5: ICMPの初期化関数を呼び出す */
     if (icmp_init() == -1) {
         errorf("icmp_init() failure");
+        return -1;
+    }
+    /* EXERCISE 13-5: ARPの初期化関数を呼び出す */
+    if (arp_init() == -1) {
+        errorf("arp_init() failure");
         return -1;
     }
 

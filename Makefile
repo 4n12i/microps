@@ -9,6 +9,7 @@ OBJS = util.o \
 	   ip.o \
 	   icmp.o \
 	   ether.o \
+	   arp.o \
 
 TESTS = test/step0.exe \
 		test/step1.exe \
@@ -23,6 +24,7 @@ TESTS = test/step0.exe \
 		test/step10.exe \
 		test/step11.exe \
 		test/step12.exe \
+		test/step13.exe \
 
 # Options of C compiler
 CFLAGS := $(CFLAGS) -g -W -Wall -Wno-unused-parameter -iquote .
