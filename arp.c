@@ -39,10 +39,10 @@ struct arp_hdr {
 /* Ethernet/IP ペアのためのARPメッセージ構造体 */
 struct arp_ether_ip {
     struct arp_hdr hdr;
-    uint8_t sha[ETHER_ADDR_LEN];
-    uint8_t spa[IP_ADDR_LEN];
-    uint8_t tha[ETHER_ADDR_LEN];
-    uint8_t tpa[IP_ADDR_LEN];
+    uint8_t sha[ETHER_ADDR_LEN]; /* sender hardware address */
+    uint8_t spa[IP_ADDR_LEN]; /* sender protocol address */
+    uint8_t tha[ETHER_ADDR_LEN]; /* target hardware address */
+    uint8_t tpa[IP_ADDR_LEN]; /* target protocol address */
 };
 
 /* ARPキャッシュ */
@@ -192,6 +192,31 @@ arp_cache_insert(ip_addr_t pa, const uint8_t *ha)
     return cache;
 }
 
+/* ARP要求の送信 */
+static int 
+arp_request(struct net_iface *iface, ip_addr_t tpa) 
+{
+    struct arp_ether_ip request;
+
+    /* EXERCISE 15-2: ARP要求のメッセージを生成する */
+    request.hdr.hrd = hton16(ARP_HRD_ETHER);
+    request.hdr.pro = hton16(ARP_PRO_IP);
+    request.hdr.hln = ETHER_ADDR_LEN;
+    request.hdr.pln = IP_ADDR_LEN;
+    request.hdr.op = hton16(ARP_OP_REQUEST);
+
+    memcpy(request.sha, iface->dev->addr, ETHER_ADDR_LEN);;
+    memcpy(request.spa, &((struct ip_iface *)iface)->unicast, IP_ADDR_LEN);
+    memset(request.tha, 0, ETHER_ADDR_LEN); /* わからないのでゼロ埋め */
+    memcpy(request.tpa, &tpa, IP_ADDR_LEN);
+
+    debugf("dev=%s, len=%zu", iface->dev->name, sizeof(request));
+    arp_dump((uint8_t *)&request, sizeof(request));
+
+    /* EXERCISE 15-3: デバイスの送信関数を呼び出してARP要求のメッセージを送信する */
+    return net_device_output(iface->dev, ETHER_TYPE_ARP, (uint8_t *)&request, sizeof(request), iface->dev->broadcast);
+}
+
 /* ARP応答の送信 */
 static int
 arp_reply(struct net_iface *iface, const uint8_t *tha, ip_addr_t tpa, const uint8_t *dst)
@@ -286,9 +311,27 @@ arp_resolve(struct net_iface *iface, ip_addr_t pa, uint8_t *ha)
     mutex_lock(&mutex);
     cache = arp_cache_select(pa);
     if (!cache) {
+        /* EXERCISE 15-1: ARPキャッシュに問い合わせ中のエントリを作成 */
+        cache = arp_cache_alloc();
+        if (!cache) {
+            errorf("arp_cache_alloc() failure");
+            return ARP_RESOLVE_ERROR;
+        }
+        cache->state = ARP_CACHE_STATE_INCOMPLETE;
+        cache->pa = pa;
+        /* cache->ha は何もしなくてOK */
+        gettimeofday(&cache->timestamp, NULL);
+
         debugf("cache not found, pa=%s", ip_addr_ntop(pa, addr1, sizeof(addr1)));
         mutex_unlock(&mutex);
-        return ARP_RESOLVE_ERROR;
+        arp_request(iface, pa); /* ARP要求の送信関数を呼び出す */
+        return ARP_RESOLVE_INCOMPLETE; /* 問い合わせ中なのでINCOMPLETEを返す */
+    }
+    /* 見つかったエントリがINCOMPLETEのままだったらパケットロスしているかもしれないので、念のため再送する */
+    if (cache->state == ARP_CACHE_STATE_INCOMPLETE) {
+        mutex_unlock(&mutex);
+        arp_request(iface, pa); /* just in case packet loss */
+        return ARP_RESOLVE_INCOMPLETE;
     }
     memcpy(ha, cache->ha, ETHER_ADDR_LEN);
     mutex_unlock(&mutex);
