@@ -227,7 +227,7 @@ ip_input(const uint8_t *data, size_t len, struct net_device *dev)
     }
     hlen = (hdr->vhl & 0x0f) << 2; 
     if (len < hlen) {
-        errorf("header length error: len=%zu < hlen%u", len, hlen);
+        errorf("header length error: len=%zu < hlen=%u", len, hlen);
         return;
     }
     total = ntoh16(hdr->total);
