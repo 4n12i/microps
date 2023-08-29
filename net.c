@@ -296,6 +296,7 @@ net_shutdown(void)
 #include "arp.h"
 #include "ip.h"
 #include "icmp.h"
+#include "udp.h"
 
 int
 net_init(void)
@@ -314,6 +315,11 @@ net_init(void)
     }
     if (icmp_init() == -1) {
         errorf("icmp_init() failure");
+        return -1;
+    }
+    /* EXERCISE 18-4: UDPの初期化関数を呼び出す */
+    if (udp_init() == -1) {
+        errorf("udp_init() failure");
         return -1;
     }
     infof("initialized");
