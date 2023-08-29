@@ -235,7 +235,7 @@ ip_input(const uint8_t *data, size_t len, struct net_device *dev)
         errorf("total length error: len=%zu < total=%u", len, total);
         return;
     }
-    if (cksum16((uint16_t *)data, len, 0) != (uint16_t)0) {
+    if (cksum16((uint16_t *)data, hlen, 0) != (uint16_t)0) {
         errorf("checksum error: sum=0x%04x, verify=0x%04x", ntoh16(hdr->sum), ntoh16(cksum16((uint16_t *)hdr, hlen, -hdr->sum)));
         return;
     }
