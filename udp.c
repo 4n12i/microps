@@ -198,10 +198,10 @@ udp_input(const uint8_t *data, size_t len, ip_addr_t src, ip_addr_t dst, struct 
         errorf("memory_alloc() failure");
         return;
     }
-    entry->foreign.addr = pcb->local.addr;
-    entry->foreign.port = pcb->local.port;
-    entry->len = hton16(len);
-    memcpy(entry->data, data, len);
+    entry->foreign.addr = src;
+    entry->foreign.port = hdr->src;
+    entry->len = len - sizeof(*hdr);
+    memcpy(entry->data, (uint8_t *)(hdr + 1), entry->len);
     if (!queue_push(&pcb->queue, entry)) {
         errorf("queue_push() failure");
         memory_free(entry);
@@ -274,13 +274,19 @@ int
 udp_open(void)
 {
     /* EXERCISE 19-2: UDPソケットのオープン */
+    int id;
     struct udp_pcb *pcb;
+
+    mutex_lock(&mutex);
     pcb = udp_pcb_alloc();
     if (!pcb) {
         errorf("udp_pcb_alloc() failure");
+        mutex_unlock(&mutex);
         return -1;
     }
-    return udp_pcb_id(pcb);
+    id = udp_pcb_id(pcb);
+    mutex_unlock(&mutex);
+    return id;
 }
 
 int
@@ -288,12 +294,16 @@ udp_close(int id)
 {
     /* EXERCISE 19-3: UDPソケットのクローズ */
     struct udp_pcb *pcb;
+
+    mutex_lock(&mutex);
     pcb = udp_pcb_get(id);
     if (!pcb) {
         errorf("udp_pcb_get() failure");
+        mutex_unlock(&mutex);
         return -1;
     }
     udp_pcb_release(pcb);
+    mutex_unlock(&mutex);
     return 0;
 }
 
@@ -310,18 +320,18 @@ udp_bind(int id, struct ip_endpoint *local)
     pcb = udp_pcb_get(id);
     if (!pcb) {
         errorf("udp_pcb_get() failure");
+        mutex_unlock(&mutex);
         return -1;
     }
     exist = udp_pcb_select(local->addr, local->port);
     if (exist) {
-        mutex_unlock(&mutex);
         errorf("already used: pcb->local=%s, exist->local=%s",
             ip_endpoint_ntop(&pcb->local, ep1, sizeof(ep1)), 
             ip_endpoint_ntop(&exist->local, ep2, sizeof(ep2)));
+        mutex_unlock(&mutex);
         return -1;
     }
-    memcpy(&pcb->local, local, sizeof(*local));
-
+    pcb->local = *local;
     debugf("bound, id=%d, local=%s", id, ip_endpoint_ntop(&pcb->local, ep1, sizeof(ep1)));
     mutex_unlock(&mutex);
     return 0;
