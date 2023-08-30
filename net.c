@@ -349,6 +349,7 @@ void net_shutdown(void)
 #include "ip.h"
 #include "icmp.h"
 #include "udp.h"
+#include "tcp.h"
 
 int 
 net_init(void)
@@ -374,6 +375,11 @@ net_init(void)
     /* EXERCISE 18-4: UDPの初期化関数を呼び出す */
     if (udp_init() == -1) {
         errorf("udp_init() failure");
+        return -1;
+    }
+    /* EXERCISE 22-2: TCPの初期化関数を呼び出す */
+    if (tcp_init() == -1) {
+        errorf("tcp_init() failure");
         return -1;
     }
 
