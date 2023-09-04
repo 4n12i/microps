@@ -37,6 +37,9 @@
 #define TCP_PCB_STATE_CLOSE_WAIT  10
 #define TCP_PCB_STATE_LAST_ACK    11
 
+#define TCP_DEFAULT_RTO 200000 /* micro seconds */
+#define TCP_RETRANSMIT_DEADLINE 12 /* seconds */
+
 /* 疑似ヘッダ */
 struct pseudo_hdr {
     uint32_t src;
@@ -90,6 +93,17 @@ struct tcp_pcb {
     uint16_t mss;
     uint8_t buf[65535]; /* receive buffer */
     struct sched_ctx ctx;
+    struct queue_head queue; /* retransmit queue */
+};
+
+struct tcp_queue_entry {
+    struct timeval first;
+    struct timeval last;
+    unsigned int rto; /* micro seconds */
+    uint32_t seq;
+    uint8_t flg;
+    size_t len;
+    uint8_t data[];
 };
 
 static mutex_t mutex = MUTEX_INITIALIZER;
@@ -264,6 +278,82 @@ tcp_output_segment(uint32_t seq, uint32_t ack, uint8_t flg, uint16_t wnd, uint8_
     return len;
 }
 
+/*
+ * TCP Retransmit
+ *
+ * NOTE: TCP Retransmit functions must be called after mutex locked
+ */
+ 
+static int 
+tcp_retransmit_queue_add(struct tcp_pcb *pcb, uint32_t seq, uint8_t flg, uint8_t *data, size_t len)
+{
+    struct tcp_queue_entry *entry;
+
+    entry = memory_alloc(sizeof(*entry) + len);
+    if (!entry) {
+        errorf("memory_alloc() failure");
+        return -1;
+    }
+    entry->rto = TCP_DEFAULT_RTO;
+    entry->seq = seq;
+    entry->flg = flg;
+    entry->len = len;
+    memcpy(entry->data, data, entry->len);
+    gettimeofday(&entry->first, NULL);
+    entry->last = entry->first;
+    if (!queue_push(&pcb->queue, entry)) {
+        errorf("queue_push() failure");
+        memory_free(entry);
+        return -1;
+    }
+    return 0;
+}
+
+static void 
+tcp_retransmit_queue_cleanup(struct tcp_pcb *pcb) 
+{
+    struct tcp_queue_entry *entry;
+
+    while (1) {
+        entry = queue_peek(&pcb->queue); /* 受信キューの先頭のエントリを見る */
+        if (!entry) {
+            break;
+        }
+        if (entry->seq >= pcb->snd.una) { /* ACKの応答が得られていなかったら処理を抜ける */
+            break;
+        }
+        entry = queue_pop(&pcb->queue); /* ACKの応答が得られていたら受信キューから取り出す */
+        debugf("remove, seq=%u, flags=%s, len=%u", entry->seq, tcp_flg_ntoa(entry->flg), entry->len);
+        memory_free(entry); /* エントリのメモリを削除する */
+    }
+    return;
+}
+
+static void 
+tcp_retransmit_queue_emit(void *arg, void *data) /* TCPタイマの処理から定期的に呼び出される */
+{
+    struct tcp_pcb *pcb;
+    struct tcp_queue_entry *entry;
+    struct timeval now, diff, timeout;
+
+    pcb = (struct tcp_pcb *)arg;
+    entry = (struct tcp_queue_entry *)data;
+    gettimeofday(&now, NULL); /* 初回送信からの経過時間を計算 */
+    timersub(&now, &entry->first, &diff);
+    if (diff.tv_sec >= TCP_RETRANSMIT_DEADLINE) { /* 初回送信からの経過時間がデッドラインを超えていたらコネクションを破棄する */
+        pcb->state = TCP_PCB_STATE_CLOSED;
+        sched_wakeup(&pcb->ctx);
+        return;
+    }
+    timeout = entry->last; /* 再送予定時刻を計算 */
+    timeval_add_usec(&timeout, entry->rto); /* 再送予定時刻を過ぎていたらTCPセグメントを再送する */
+    if (timercmp(&now, &timeout, >)) { /* 再送予定時刻を過ぎていたらTCPセグメントを送信する */
+        tcp_output_segment(entry->seq, pcb->rcv.nxt, entry->flg, pcb->rcv.wnd, entry->data, entry->len, &pcb->local, &pcb->foreign);
+        entry->last = now; /* 最終送信時刻を更新 */
+        entry->rto *= 2; /* 再送タイムアウト（次の再送までの時間）を2倍の値で設定 */
+    }
+}
+
 static ssize_t
 tcp_output(struct tcp_pcb *pcb, uint8_t flg, uint8_t *data, size_t len)
 {
@@ -273,8 +363,8 @@ tcp_output(struct tcp_pcb *pcb, uint8_t flg, uint8_t *data, size_t len)
     if (TCP_FLG_ISSET(flg, TCP_FLG_SYN)) {
         seq = pcb->iss;
     }
-    if (TCP_FLG_ISSET(flg, TCP_FLG_SYN | TCP_FLG_FIN) || len) {
-        /* TODO: add retransmission queue */
+    if (TCP_FLG_ISSET(flg, TCP_FLG_SYN | TCP_FLG_FIN) || len) { /* シーケンス番号を消費するセグメントだけ再送キューへ格納する（単純なACKセグメントやRSTセグメントは対象外） */
+        tcp_retransmit_queue_add(pcb, seq, flg, data, len);
     }
     return tcp_output_segment(seq, pcb->rcv.nxt, flg, pcb->rcv.wnd, data, len, &pcb->local, &pcb->foreign);
 }
@@ -440,13 +530,14 @@ tcp_segment_arrives(struct tcp_segment_info *seg, uint8_t flags, uint8_t *data, 
             pcb->state = TCP_PCB_STATE_ESTABLISHED;
             sched_wakeup(&pcb->ctx);
         } else {
-            tcp_output_segment(seg->ack, 0, TCP_FLG_RST, 0, NULL, 0, local, foreign);                return;
+            tcp_output_segment(seg->ack, 0, TCP_FLG_RST, 0, NULL, 0, local, foreign);                
+            return;
         }
         /* fail through */
     case TCP_PCB_STATE_ESTABLISHED:
         if (pcb->snd.una < seg->ack && seg->ack <= pcb->snd.nxt) { /* まだACKを受け取ってない送信データに対するACKかどうか */
             pcb->snd.una = seg->ack; /* 確認が取れているシーケンス番号の値を更新 */
-            /* TODO: Any segments on the retransmission queue which are thereby entirely acknowledged are removed. */
+            tcp_retransmit_queue_cleanup(pcb); /* 再送キューの削除処理を呼び出す */
             /* ignore: User should receive positive acknowledgments for buffers which have been SEND and fully acknowledged (i.e., SEND buffer should be returned with "ok" response) */
             if (pcb->snd.wl1 < seg->seq || (pcb->snd.wl1 == seg->seq && pcb->snd.wl2 <= seg->ack)) { /* 最後にウィンドウの情報を更新したときよりも後に送信されたセグメントかどうか */
                 pcb->snd.wnd = seg->seq;
@@ -558,6 +649,21 @@ tcp_input(const uint8_t *data, size_t len, ip_addr_t src, ip_addr_t dst, struct 
     return;
 }
 
+static void 
+tcp_timer(void) 
+{
+    struct tcp_pcb *pcb;
+
+    mutex_lock(&mutex);
+    for (pcb = pcbs; pcb < tailof(pcbs); pcb++) {
+        if (pcb->state == TCP_PCB_STATE_FREE) {
+            continue;
+        }
+        queue_foreach(&pcb->queue, tcp_retransmit_queue_emit, pcb); /* 受信キューの全てのエントリに対して tcp_retransmit_queue_emit() を実行する */
+    }
+    mutex_unlock(&mutex);
+}
+
 static void
 event_handler(void *arg)
 {
@@ -575,12 +681,19 @@ event_handler(void *arg)
 int
 tcp_init(void)
 {
+    struct timeval interval = {0,100000};
+
     /* EXERCISE 22-1: IPの上位プロトコルとしてTCPを登録する */
     if (ip_protocol_register(IP_PROTOCOL_TCP, tcp_input) == -1) {
         errorf("ip_protocol_register() failure");
         return -1;
     }
     net_event_subscribe(event_handler, NULL);
+    
+    if (net_timer_register(interval, tcp_timer) == -1) {
+        errorf("net_timer_register() failure");
+        return -1;
+    }
     return 0;
 }
 
