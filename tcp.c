@@ -437,6 +437,15 @@ tcp_segment_arrives(struct tcp_segment_info *seg, uint8_t flags, uint8_t *data, 
         /*
          * 1st check the ACK bit
          */
+        if (TCP_FLG_ISSET(flags, TCP_FLG_ACK)) {
+            if (seg->ack <= pcb->iss || seg->ack > pcb->snd.nxt) { /* 送信していないシーケンス番号に対するACKだったらRSTを返す */
+                tcp_output_segment(seg->ack, 0, TCP_FLG_RST, 0, NULL, 0, local, foreign);
+                return;
+            }
+            if (pcb->snd.una <= seg->ack && seg->ack <= pcb->snd.nxt) { /* まだACKの応答が得られていないシーケンス番号に対するものだったら受け入れる */
+                acceptable = 1;
+            }
+        }
 
         /*
          * 2nd check the RST bit
@@ -449,6 +458,30 @@ tcp_segment_arrives(struct tcp_segment_info *seg, uint8_t flags, uint8_t *data, 
         /*
          * 4th check the SYN bit
          */
+        if (TCP_FLG_ISSET(flags, TCP_FLG_SYN)) {
+            pcb->rcv.nxt = seg->seq + 1; /* 次に受信すべきシーケンス番号を更新する */
+            pcb->irs = seg->seq; /* 相手の初期シーケンス番号を保存する */
+            if (acceptable) { /* ACKを受け入れた際の処理 */
+                pcb->snd.una = seg->ack; /* 未確認のシーケンス番号を更新 */
+                tcp_retransmit_queue_cleanup(pcb); /* 再送キューからACKによって到達できているTCPセグメントを削除 */
+            }
+            if (pcb->snd.una > pcb->iss) {
+                pcb->state = TCP_PCB_STATE_ESTABLISHED; /* ESTABLISHED状態へ移行 */
+                tcp_output(pcb, TCP_FLG_ACK, NULL, 0); /* 相手のSYNに対するACKを返す */
+                /* NOTE: not specified in the RFC793, but send window initialization required */
+                pcb->snd.wnd = seg->wnd;
+                pcb->snd.wl1 = seg->seq;
+                pcb->snd.wl2 = seg->ack;
+                sched_wakeup(&pcb->ctx); /* 状態の変化を待つために休止しているタスクを起床 */
+                /* ignore: continue processing at the sixth step below where the URG bit is checked */
+                return;
+            } else {
+                pcb->state = TCP_PCB_STATE_SYN_RECEIVED; /* 同時オープンに（両方が同時にSYNを送った場合）に対処するためのコード */
+                tcp_output(pcb, TCP_FLG_SYN | TCP_FLG_ACK, NULL, 0);
+                /* ignore: If there are other controls or text in the segment, queue them for processing after the ESTABLISHED state has been reached */
+                return;
+            }
+        }
 
         /*
          * 5th, if neither of the SYN or RST bits is set then drop the segment and return
@@ -716,11 +749,23 @@ tcp_open_rfc793(struct ip_endpoint *local, struct ip_endpoint *foreign, int acti
         mutex_unlock(&mutex);
         return -1;
     }
-    if (active) {
-        errorf("active open does not implement");
-        tcp_pcb_release(pcb);
-        mutex_unlock(&mutex);
-        return -1;
+    if (active) { /* Active モード */
+        debugf("active open: local=%s, foreign=%s, connecting...", 
+            ip_endpoint_ntop(local, ep1, sizeof(ep1)), ip_endpoint_ntop(foreign, ep2, sizeof(ep2)));
+        pcb->local = *local;
+        pcb->foreign = *foreign;
+        pcb->rcv.wnd = sizeof(pcb->buf);
+        pcb->iss = random(); /* シーケンス番号の初期値を採番 */
+        if (tcp_output(pcb, TCP_FLG_SYN, NULL, 0) == -1) { /* SYNセグメントを送信 */
+            errorf("tcp_output() failure");
+            pcb->state = TCP_PCB_STATE_CLOSED;
+            tcp_pcb_release(pcb);
+            mutex_unlock(&mutex);
+            return -1;
+        }
+        pcb->snd.una = pcb->iss; /* まだACKの確認が得られていないシーケンス番号として設定 */
+        pcb->snd.nxt = pcb->iss + 1; /* 次に送信すべきシーケンス番号を設定 */
+        pcb->state = TCP_PCB_STATE_SYN_SENT; /* SYN-SENT 状態へ移行 */
     } else {
         debugf("passive open: local=%s, waiting for connection...", ip_endpoint_ntop(local, ep1, sizeof(ep1)));
         pcb->local = *local;
